@@ -11,12 +11,15 @@ on:
         description: 'Publish the .deb packages as a GitHub release'
         type: boolean
         default: true
+      zen:
+        description: 'Use the Zen/Liquorix patched tree (zen-kernel 7.x/main) instead of vanilla'
+        type: boolean
+        default: false
   push:
     branches: [main]
     paths:
       - 'config/**'
       - 'scripts/**'
-      - '.github/workflows/build.yml'
 
 permissions:
   contents: write
@@ -56,18 +59,26 @@ jobs:
         run: |
           set -euo pipefail
           VER=${{ steps.ver.outputs.version }}
-          curl -fSL -o linux.tar.xz \
-            "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${VER}.tar.xz"
-          tar -xf linux.tar.xz
-          rm linux.tar.xz
-          mv "linux-${VER}" kernel
+          if [ '${{ inputs.zen }}' = 'true' ]; then
+            SER=$(echo "$VER" | cut -d. -f1-2)
+            echo "Source: zen-kernel (Liquorix) tree, branch ${SER}/main"
+            git clone --depth 1 -b "${SER}/main" \
+              https://github.com/zen-kernel/zen-kernel kernel
+          else
+            echo "Source: vanilla stable $VER"
+            curl -fSL -o linux.tar.xz \
+              "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${VER}.tar.xz"
+            tar -xf linux.tar.xz
+            rm linux.tar.xz
+            mv "linux-${VER}" kernel
+          fi
 
       - name: Install build dependencies
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libelf-dev libssl-dev zstd cpio kmod dwarves \
-            libdw-dev libdwarf-dev fakeroot
+            libdw-dev libdwarf-dev fakeroot build-essential debhelper
 
       - name: Configure (base config + tune.sh)
         working-directory: kernel
@@ -83,7 +94,13 @@ jobs:
 
       - name: Build Debian packages
         working-directory: kernel
-        run: make -j"$(nproc)" bindeb-pkg
+        run: |
+          set -euo pipefail
+          echo "kernel.release: $(cat include/config/kernel.release)"
+          # mkdebian pins debhelper-compat (= 12) for Debian bullseye hosts;
+          # Ubuntu runners ship 13 — relax the pin to any debhelper.
+          sed -i 's/debhelper-compat (= [0-9]*)/debhelper-compat/' scripts/package/mkdebian
+          make -j"$(nproc)" bindeb-pkg
 
       - name: Collect packages
         run: |
