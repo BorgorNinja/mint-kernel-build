@@ -55,10 +55,29 @@ jobs:
           echo "version=$VER" >> "$GITHUB_OUTPUT"
           echo "Building kernel $VER (latest 7.x stable: see https://kernel.org)"
 
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libelf-dev libssl-dev zstd cpio kmod dwarves \
+            libdw-dev libdwarf-dev fakeroot build-essential debhelper
+
+      - name: Cache kernel build tree
+        uses: actions/cache@v4
+        with:
+          path: kernel
+          key: kernel-${{ steps.ver.outputs.version }}-${{ hashFiles('config/base-config', 'scripts/tune.sh') }}
+          restore-keys: |
+            kernel-${{ steps.ver.outputs.version }}-
+
       - name: Download and unpack source
         run: |
           set -euo pipefail
           VER=${{ steps.ver.outputs.version }}
+          if [ -f kernel/Makefile ]; then
+            echo "Cache hit — reusing compiled tree for $VER"
+            exit 0
+          fi
           if [ '${{ inputs.zen }}' = 'true' ]; then
             SER=$(echo "$VER" | cut -d. -f1-2)
             echo "Source: zen-kernel (Liquorix) tree, branch ${SER}/main"
