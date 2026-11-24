@@ -67,7 +67,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             bc bison flex libelf-dev libssl-dev zstd cpio kmod dwarves \
-            libdwarf-dev fakeroot
+            libdw-dev libdwarf-dev fakeroot
 
       - name: Configure (base config + tune.sh)
         working-directory: kernel
