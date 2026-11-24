@@ -1,0 +1,115 @@
+name: build-kernel
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Kernel version (e.g. "7.3.6"). Leave empty for latest 7.x stable.'
+        required: false
+        default: ''
+      release:
+        description: 'Publish the .deb packages as a GitHub release'
+        type: boolean
+        default: true
+  push:
+    branches: [main]
+    paths:
+      - 'config/**'
+      - 'scripts/**'
+      - '.github/workflows/build.yml'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-kernel
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04   # gcc-13, matches the compiler used by DKMS on this Mint box
+    timeout-minutes: 180
+    env:
+      DEBIAN_FRONTEND: noninteractive
+      BASE_CONFIG: ../config/base-config
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Resolve kernel version
+        id: ver
+        run: |
+          set -euo pipefail
+          INPUT='${{ inputs.version }}'
+          if [ -n "$INPUT" ]; then
+            VER="$INPUT"
+          else
+            VER=$(curl -fsSL https://www.kernel.org/releases.json | \
+              jq -r '[.releases[] | select(.moniker=="stable" or .moniker=="longterm")
+                     | select(.version | startswith("7."))][0].version')
+          fi
+          echo "version=$VER" >> "$GITHUB_OUTPUT"
+          echo "Building kernel $VER (latest 7.x stable: see https://kernel.org)"
+
+      - name: Download and unpack source
+        run: |
+          set -euo pipefail
+          VER=${{ steps.ver.outputs.version }}
+          curl -fSL -o linux.tar.xz \
+            "https://cdn.kernel.org/pub/linux/kernel/v7.x/linux-${VER}.tar.xz"
+          tar -xf linux.tar.xz
+          rm linux.tar.xz
+          mv "linux-${VER}" kernel
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            bc bison flex libelf-dev libssl-dev zstd cpio kmod dwarves fakeroot
+
+      - name: Configure (base config + tune.sh)
+        working-directory: kernel
+        run: |
+          set -euo pipefail
+          chmod +x ../scripts/tune.sh
+          cp ../config/base-config .config
+          bash ../scripts/tune.sh
+
+      - name: Build kernel image and modules
+        working-directory: kernel
+        run: make -j"$(nproc)" all
+
+      - name: Build Debian packages
+        working-directory: kernel
+        run: make -j"$(nproc)" bindeb-pkg
+
+      - name: Collect packages
+        run: |
+          set -euo pipefail
+          REL=$(make -C kernel kernelrelease)
+          echo "release=$REL" >> "$GITHUB_ENV"
+          mv ../*.deb ./
+          ls -lh ./*.deb
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-${{ steps.ver.outputs.version }}-mint-tuned
+          path: ./*.deb
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Publish release
+        if: ${{ github.event_name == 'workflow_dispatch' && inputs.release }}
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="v${{ steps.ver.outputs.version }}-mint-tuned"
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" ./*.deb \
+            --title "$TAG" \
+            --notes "Tuned kernel ${{ env.release }} for this Acer/i5-10210U machine.
+          Install with: \`sudo dpkg -i linux-headers-*.deb linux-image-*.deb\`, then \`sudo update-grub\`.
+          NVIDIA (580) and VirtualBox DKMS modules build automatically via kernel postinst hooks."
